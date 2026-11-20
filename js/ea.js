@@ -853,7 +853,7 @@ async function attachDialog(it, inst) {
     let f;
     if (p.type === 'bool') { f = U.el('input.switch', { type: 'checkbox', checked: v0 ? true : null }); }
     else if (p.type === 'ENUM_TIMEFRAMES') { f = U.el('select.inp'); for (const k of TF_ENUM) f.append(U.el('option', { value: NUM[k], text: k.replace('PERIOD_', ''), selected: +v0 === NUM[k] ? true : null })); }
-    else if (p.opts) { f = U.el('select.inp'); p.opts.forEach(o => f.append(U.el('option', { value: o.v, text: o.n, selected: +v0 === o.v ? true : null }))); }
+    else if (p.opts) { f = U.el('select.inp'); p.opts.forEach(o => f.append(U.el('option', { value: o.v, text: o.l || o.n, selected: +v0 === o.v ? true : null }))); }
     else if (p.type === 'string') f = U.el('input.inp', { value: v0 });
     else f = U.el('input.inp', { inputmode: 'decimal', value: String(v0) });
     fields[p.name] = { f, p };

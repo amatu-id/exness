@@ -16,7 +16,7 @@
 //|  sebagai BE + trailing basket (input bisa diubah).               |
 //+------------------------------------------------------------------+
 #property copyright   "LITUS"
-#property version     "1.01"
+#property version     "1.02"
 #property description "LITUS: tangga BUY STOP + SELL STOP, lot berlipat berpasangan (pyramid searah gerakan)."
 #property description "Keluar per basket: Break-Even + Trailing profit, Risk Guard rugi basket & harian."
 #property description "Filter: jam London/NY, spread, volatilitas ATR, berita high-impact (kalender MT5)."
@@ -24,6 +24,15 @@
 #include <Trade/Trade.mqh>
 
 //--- inputs ---------------------------------------------------------
+enum ENUM_LITUS_PRESET
+{
+   LP_AUTO   = 0,   // AUTO: angka harga mengikuti simbol (BTC otomatis)
+   LP_MANUAL = 1    // MANUAL: pakai semua input di bawah
+};
+input group "=== Preset ==="
+input ENUM_LITUS_PRESET InpPreset = LP_AUTO; // Preset (AUTO: BTC pakai angka BTC, XAU/lainnya pakai input)
+input bool     InpWeekend       = false;  // Trading Sabtu-Minggu (AUTO BTC: selalu ON)
+
 input group "=== Tangga (grid) ==="
 input int      InpLevels        = 20;     // Level per sisi (BUY STOP di atas, SELL STOP di bawah)
 input double   InpStep          = 1.0;    // Jarak antar level (harga, XAU: $1)
@@ -83,6 +92,11 @@ input int      InpSlippage      = 30;     // Deviasi (point)
 input bool     InpShowPanel     = true;   // Tampilkan panel
 
 //--- globals --------------------------------------------------------
+// v1.02: angka dalam satuan harga dipakai lewat P_* (hasil preset), bukan langsung dari input
+double   P_Step, P_Start, P_MaxSpread, P_ATRMin, P_ATRMax, P_BETrig, P_BELock, P_TrailStart, P_TrailMaxGive, P_BasketTP;
+bool     P_UseTime, P_Weekend;
+int      P_FridayStop;
+string   g_preset = "MANUAL";
 CTrade   trade;
 string   g_sym;
 int      g_atr = INVALID_HANDLE;
@@ -108,6 +122,28 @@ string   g_newsN[];
 datetime g_newsLoaded = 0;
 
 //+------------------------------------------------------------------+
+// Preset: BTC bergerak ~25x emas (ATR M5 ~$120 vs ~$5, spread $6.4 vs $0.24) dan buka 24/7
+void ResolvePreset()
+{
+   P_Step = InpStep; P_Start = InpStartDist; P_MaxSpread = InpMaxSpread; P_ATRMin = InpATRMin; P_ATRMax = InpATRMax;
+   P_BETrig = InpBETrigger; P_BELock = InpBELock; P_TrailStart = InpTrailStart; P_TrailMaxGive = InpTrailMaxGive; P_BasketTP = InpBasketTP;
+   P_UseTime = InpUseTime; P_FridayStop = InpFridayStop; P_Weekend = InpWeekend;
+   g_preset = "MANUAL";
+   if(InpPreset != LP_AUTO) return;
+   string s = g_sym;
+   StringToUpper(s);
+   if(StringFind(s, "BTC") >= 0)
+   {
+      P_Step = 25; P_Start = 25; P_MaxSpread = 12; P_ATRMin = 10; P_ATRMax = 250;
+      P_BETrig = 15; P_BELock = 4; P_TrailStart = 30;
+      P_TrailMaxGive = InpTrailMaxGive * 25; P_BasketTP = InpBasketTP * 25;
+      P_UseTime = false; P_FridayStop = 0; P_Weekend = true;
+      g_preset = "AUTO BTC";
+   }
+   else if(StringFind(s, "XAU") >= 0) g_preset = "AUTO XAU";
+   else g_preset = "AUTO (input)";
+}
+
 double Pt()      { return SymbolInfoDouble(g_sym, SYMBOL_POINT); }
 double TickSz()  { double t = SymbolInfoDouble(g_sym, SYMBOL_TRADE_TICK_SIZE); return t > 0 ? t : Pt(); }
 double NP(double p) { double t = TickSz(); return NormalizeDouble(MathRound(p / t) * t, (int)SymbolInfoInteger(g_sym, SYMBOL_DIGITS)); }
@@ -295,13 +331,13 @@ bool FiltersOK(string &why)
    double spr = ask - bid;
    bool ok = true;
 
-   st_time = InpUseTime ? StringFormat("LONDON/NY %02d-%02d", InpStartHour, InpEndHour) : "OFF";
-   if(InpUseTime && !InHours(t.hour)) { st_time += " TUTUP"; if(ok) why = "di luar jam"; ok = false; }
-   if(t.day_of_week == 5 && InpFridayStop > 0 && t.hour >= InpFridayStop) { st_time += " JUMAT"; if(ok) why = "Jumat sore"; ok = false; }
-   if(t.day_of_week == 0 || t.day_of_week == 6) { st_time += " LIBUR"; if(ok) why = "akhir pekan"; ok = false; }
+   st_time = P_UseTime ? StringFormat("LONDON/NY %02d-%02d", InpStartHour, InpEndHour) : (P_Weekend ? "OFF (24/7)" : "OFF (24 jam)");
+   if(P_UseTime && !InHours(t.hour)) { st_time += " TUTUP"; if(ok) why = "di luar jam"; ok = false; }
+   if(t.day_of_week == 5 && P_FridayStop > 0 && t.hour >= P_FridayStop) { st_time += " JUMAT"; if(ok) why = "Jumat sore"; ok = false; }
+   if(!P_Weekend && (t.day_of_week == 0 || t.day_of_week == 6)) { st_time += " LIBUR"; if(ok) why = "akhir pekan"; ok = false; }
 
    st_spread = StringFormat("%.2f", spr);
-   if(InpMaxSpread > 0 && spr > InpMaxSpread) { st_spread += " TINGGI"; if(ok) why = "spread tinggi"; ok = false; }
+   if(P_MaxSpread > 0 && spr > P_MaxSpread) { st_spread += " TINGGI"; if(ok) why = "spread tinggi"; ok = false; }
    else st_spread = "OK " + st_spread;
 
    if(InpUseATR && g_atr != INVALID_HANDLE)
@@ -310,8 +346,8 @@ bool FiltersOK(string &why)
       if(CopyBuffer(g_atr, 0, 1, 1, a) == 1)
       {
          st_vol = StringFormat("ATR %.2f", a[0]);
-         if(a[0] < InpATRMin) { st_vol += " SEPI"; if(ok) why = "volatilitas rendah"; ok = false; }
-         else if(InpATRMax > 0 && a[0] > InpATRMax) { st_vol += " LIAR"; if(ok) why = "volatilitas ekstrem"; ok = false; }
+         if(a[0] < P_ATRMin) { st_vol += " SEPI"; if(ok) why = "volatilitas rendah"; ok = false; }
+         else if(P_ATRMax > 0 && a[0] > P_ATRMax) { st_vol += " LIAR"; if(ok) why = "volatilitas ekstrem"; ok = false; }
          else st_vol = "OK " + st_vol;
       }
       else st_vol = "menunggu data";
@@ -347,7 +383,7 @@ void PlaceGrid()
    if(ask <= 0 || bid <= 0) return;
    double base = BaseLot();
    double minStop = (double)SymbolInfoInteger(g_sym, SYMBOL_TRADE_STOPS_LEVEL) * Pt();
-   double start = MathMax(InpStartDist, minStop + Pt());
+   double start = MathMax(P_Start, minStop + Pt());
 
    // Risk Guard: berapa level muat di margin (asumsi seluruh satu sisi terisi)
    int n = MathMax(1, InpLevels);
@@ -389,13 +425,13 @@ void PlaceGrid()
       double l = LotAt(i, base);
       if(doB)
       {
-         double p = NP(b0 + i * InpStep);
+         double p = NP(b0 + i * P_Step);
          if(trade.BuyStop(l, p, g_sym, 0, 0, ORDER_TIME_GTC, 0, StringFormat("LITUS B%d", i + 1))) placed++;
          else if(CheckFail()) return;
       }
       if(doS)
       {
-         double p = NP(s0 - i * InpStep);
+         double p = NP(s0 - i * P_Step);
          if(trade.SellStop(l, p, g_sym, 0, 0, ORDER_TIME_GTC, 0, StringFormat("LITUS S%d", i + 1))) placed++;
          else if(CheckFail()) return;
       }
@@ -429,13 +465,13 @@ void ManageBasket(double profit)
    if(profit > g_peak) { g_peak = profit; GlobalVariableSet(g_gvPeak, g_peak); }
 
    double lock = 0; bool on = false;
-   if(InpUseBE && g_peak >= MoneyOf(InpBETrigger))
-   { lock = MoneyOf(InpBELock); on = true; st_be = "LOCKED"; }
+   if(InpUseBE && g_peak >= MoneyOf(P_BETrig))
+   { lock = MoneyOf(P_BELock); on = true; st_be = "LOCKED"; }
    else st_be = InpUseBE ? "ON" : "OFF";
-   if(InpUseTrail && g_peak >= MoneyOf(InpTrailStart))
+   if(InpUseTrail && g_peak >= MoneyOf(P_TrailStart))
    {
       double give = g_peak * InpTrailGiveback / 100.0;
-      if(InpTrailMaxGive > 0) give = MathMin(give, MoneyOf(InpTrailMaxGive));
+      if(P_TrailMaxGive > 0) give = MathMin(give, MoneyOf(P_TrailMaxGive));
       double tl = g_peak - give;
       if(!on || tl > lock) lock = tl;
       on = true; st_trail = "AKTIF";
@@ -444,7 +480,7 @@ void ManageBasket(double profit)
    g_lock = lock; g_lockOn = on;
 
    if(on && profit <= lock) { CloseAll(st_trail == "AKTIF" ? "trailing" : "break-even"); return; }
-   if(InpBasketTP > 0 && profit >= MoneyOf(InpBasketTP)) { CloseAll("TP basket"); return; }
+   if(P_BasketTP > 0 && profit >= MoneyOf(P_BasketTP)) { CloseAll("TP basket"); return; }
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    if(InpMaxBasketLossPct > 0 && profit <= -bal * InpMaxBasketLossPct / 100.0) { CloseAll("Risk Guard basket"); return; }
    if(InpMaxBasketMin > 0 && g_basketStart > 0 && TimeCurrent() - g_basketStart >= InpMaxBasketMin * 60)
@@ -553,7 +589,7 @@ void Panel(double profit, double lb, double ls, int nb, int ns, int pb, int ps)
    color ok = C'110,231,183', warn = C'251,191,36', bad = C'248,113,113', txt = C'226,232,240', gold = C'255,176,32';
    string cur = AccountInfoString(ACCOUNT_CURRENCY);
    int r = 0;
-   Lbl(r++, "LITUS  v1.01   " + g_sym, gold, 11, "Arial Black");
+   Lbl(r++, "LITUS  v1.02   " + g_sym, gold, 11, "Arial Black");
    Lbl(r++, "● " + st_state, StringFind(st_state, "MENUNGGU") == 0 || st_state == "MARGIN KURANG" ? warn : ok, 9);
    Lbl(r++, "> Auto Entry: " + (st_block == "" ? "ON" : "TAHAN (" + st_block + ")"), st_block == "" ? ok : warn);
    Lbl(r++, "> News Filter: " + st_news, StringFind(st_news, "BLOK") == 0 ? bad : ok);
@@ -571,7 +607,7 @@ void Panel(double profit, double lb, double ls, int nb, int ns, int pb, int ps)
    Lbl(r++, StringFormat("Puncak %s   Kunci %s", DoubleToString(g_peak, 2), g_lockOn ? DoubleToString(g_lock, 2) : "-"), txt);
    Lbl(r++, StringFormat("Hari ini %s %s%s", DoubleToString(g_dayPL, 2), cur, g_dayStop ? "  STOP" : ""), g_dayPL >= 0 ? ok : bad);
    Lbl(r++, "Terakhir: " + g_lastClose, txt, 8);
-   Lbl(r++, StringFormat("Tangga %d lvl x %.2f  lot %.2f..%.2f", InpLevels, InpStep, LotAt(0, BaseLot()), LotAt(InpLevels - 1, BaseLot())), txt, 8);
+   Lbl(r++, StringFormat("%s · tangga %d lvl x %.2f  lot %.2f..%.2f", g_preset, InpLevels, P_Step, LotAt(0, BaseLot()), LotAt(InpLevels - 1, BaseLot())), txt, 8);
    ChartRedraw(0);
 }
 
@@ -587,7 +623,8 @@ int OnInit()
       Alert("LITUS butuh akun HEDGING (BUY STOP & SELL STOP terbuka bersamaan). Akun ini netting.");
       return INIT_FAILED;
    }
-   if(InpStep <= 0 || InpLevels < 1) { Alert("LITUS: InpStep/InpLevels tidak valid"); return INIT_PARAMETERS_INCORRECT; }
+   ResolvePreset();
+   if(P_Step <= 0 || InpLevels < 1) { Alert("LITUS: P_Step/InpLevels tidak valid"); return INIT_PARAMETERS_INCORRECT; }
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(g_sym);
@@ -611,8 +648,8 @@ int OnInit()
    }
    g_day = -1;
    EventSetTimer(1);
-   PrintFormat("LITUS v1.01 %s: %d level x %.2f, start %.2f, lot %.2f x%.1f tiap %d level (maks %.2f)",
-               g_sym, InpLevels, InpStep, InpStartDist, InpBaseLot, InpLotMult, InpLotRepeat, InpMaxLot);
+   PrintFormat("LITUS v1.02 %s [%s]: %d level x %.2f, start %.2f, lot %.2f x%.1f tiap %d level (maks %.2f)",
+               g_sym, g_preset, InpLevels, P_Step, P_Start, InpBaseLot, InpLotMult, InpLotRepeat, InpMaxLot);
    Process();
    return INIT_SUCCEEDED;
 }

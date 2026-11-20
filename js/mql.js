@@ -35,7 +35,7 @@ function fail(line, msg) { const e = new Error((line ? 'Baris ' + line + ': ' : 
 function preprocess(src, warn) {
   src = String(src).replace(/\r\n?/g, '\n').replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '));
   const lines = src.split('\n');
-  const inputs = [], defines = [], props = {};
+  const inputs = [], defines = [], props = {}, elabels = {};
   let group = '', inImport = false;
   for (let i = 0; i < lines.length; i++) {
     const L = lines[i], s = L.trim();
@@ -48,6 +48,7 @@ function preprocess(src, warn) {
       lines[i] = '';
       continue;
     }
+    const em = /^\s*([A-Za-z_]\w*)\s*(?:=\s*[^,\/]+)?,?\s*\/\/\s*(.+)$/.exec(L); if (em) elabels[em[1]] = em[2].trim(); // enum member labels
     let m = /^\s*(?:input|sinput)\s+group\s+"([^"]*)"/.exec(L);
     if (m) { group = m[1]; lines[i] = ''; continue; }
     m = /^(\s*)(?:input|sinput)\s+(?:const\s+)?(\w+)\s+(\w+)\s*(?:=\s*(.*?))?\s*;\s*(?:\/\/\s*(.*))?$/.exec(L);
@@ -57,7 +58,7 @@ function preprocess(src, warn) {
       lines[i] = ind + type + ' ' + name + ' = __inp("' + name + '", ' + (def == null || def === '' ? (type === 'string' ? '""' : type === 'bool' ? 'false' : '0') : def) + ');';
     }
   }
-  return { text: lines.join('\n'), inputs, defines, props };
+  return { text: lines.join('\n'), inputs, defines, props, elabels };
 }
 
 /* ---------- 2. lexer ---------- */
@@ -390,7 +391,7 @@ M.compile = function (src) {
   try { fn = new Function('__env', '__inp', code); } // eslint-disable-line no-new-func
   catch (e) { const er = new Error('Terjemahan gagal (' + e.message + '). Bagian MQL5 ini belum didukung.'); er.code = code; throw er; }
   if (!fnInfo.OnTick && !fnInfo.OnTimer) warn.push('Tidak ada OnTick/OnTimer — EA tidak akan melakukan apa-apa');
-  for (const inp of pre.inputs) if (enumInfo[inp.type]) inp.opts = enumInfo[inp.type];
+  for (const inp of pre.inputs) if (enumInfo[inp.type]) inp.opts = enumInfo[inp.type].map(o => Object.assign({ l: pre.elabels[o.n] || '' }, o));
   return { fn, code, inputs: pre.inputs, props: pre.props, warn };
 };
 
