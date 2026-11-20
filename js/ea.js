@@ -17,6 +17,10 @@ EA.BUILTIN = BUILTIN;
 EA.st = Object.assign({ v: 1, algo: true, list: [] }, U.load(K_ST, null) || {});
 EA.lib = U.load(K_LIB, []) || [];
 let GV = U.load(K_GV, {}) || {};
+let DEV = U.load('pt.exness.dev', null); if (!DEV) { DEV = 'd' + U.uid(); U.save('pt.exness.dev', DEV); }
+EA.DEV = DEV;
+/* EA state syncs to the user's other devices; each EA runs on ONE device only (inst.dev), else ladders would be placed twice */
+const mine = i => !i.dev || i.dev === DEV;
 const R = {};          // runtime per instance id
 const SRC = {};        // libId -> source text
 const COMPILED = {};   // libId -> compiled (per source)
@@ -561,10 +565,10 @@ EA.log = function (id, msg, lv) {
 };
 EA.logs = id => (R[id] && R[id].log) || (U.load(kLog(id), []) || []);
 EA.inst = id => EA.st.list.find(x => x.id === id) || null;
-EA.status = id => { const r = R[id]; const i = EA.inst(id); if (!i) return { k: 'off', t: '' }; if (r && r.err) return { k: 'err', t: r.err }; if (r && r.running) return EA.st.algo ? { k: 'on', t: 'Berjalan' } : { k: 'wait', t: 'Algo Trading OFF' }; if (i.run && !AT.isLeader()) return { k: 'wait', t: 'Berjalan di tab lain' }; if (i.run) return { k: 'wait', t: 'Menyiapkan…' }; return { k: 'off', t: 'Berhenti' }; };
+EA.status = id => { const r = R[id]; const i = EA.inst(id); if (!i) return { k: 'off', t: '' }; if (r && r.err) return { k: 'err', t: r.err }; if (r && r.running) return EA.st.algo ? { k: 'on', t: 'Berjalan' } : { k: 'wait', t: 'Algo Trading OFF' }; if (i.run && !mine(i)) return { k: 'wait', t: 'Berjalan di perangkat lain' }; if (i.run && !AT.isLeader()) return { k: 'wait', t: 'Berjalan di tab lain' }; if (i.run) return { k: 'wait', t: 'Menyiapkan…' }; return { k: 'off', t: 'Berhenti' }; };
 
 EA.attach = function (o) {
-  const inst = { id: 'e' + U.uid(), lib: o.lib, name: o.name, sym: o.sym, tf: o.tf || 300, acc: o.acc, inputs: o.inputs || {}, run: true, created: Date.now() };
+  const inst = { id: 'e' + U.uid(), lib: o.lib, name: o.name, sym: o.sym, tf: o.tf || 300, acc: o.acc, inputs: o.inputs || {}, run: true, created: Date.now(), dev: DEV };
   EA.st.list.push(inst); saveSt();
   EA.log(inst.id, 'Dipasang: ' + inst.name + ' pada ' + S.map[inst.sym].n + ' ' + tfName(inst.tf) + ', akun #' + inst.acc);
   if (AT.isLeader()) EA.start(inst.id);
@@ -576,7 +580,7 @@ EA.update = function (id, o) {
   const wasRunning = R[id] && R[id].running;
   if (wasRunning) EA.stop(id, null, 5);
   Object.assign(inst, o); saveSt();
-  if (inst.run && AT.isLeader()) EA.start(id);
+  if (inst.run && mine(inst) && AT.isLeader()) EA.start(id);
   U.emit('ea');
 };
 EA.remove = function (id) {
@@ -589,9 +593,28 @@ EA.remove = function (id) {
 EA.toggleRun = function (id) {
   const inst = EA.inst(id); if (!inst) return;
   if (inst.run) { inst.run = false; saveSt(); EA.stop(id, 'Dihentikan', 1); }
-  else { inst.run = true; saveSt(); if (AT.isLeader()) EA.start(id); }
+  else { inst.run = true; inst.dev = DEV; saveSt(); if (AT.isLeader()) EA.start(id); }
   U.emit('ea');
 };
+/* move a running EA to this device (the other device stops it when it sees the change) */
+EA.claim = function (id) { const inst = EA.inst(id); if (!inst) return; inst.dev = DEV; inst.run = true; saveSt(); EA.log(id, 'Dipindahkan ke perangkat ini'); if (AT.isLeader()) EA.start(id); U.emit('ea'); };
+/* one click: LITUS on XAU/USD M5 + BTC M5 like the MT5 setup (BTC uses its own magic) */
+EA.setupLitus = function () {
+  const a = E.active(); const made = [];
+  for (const [sym, magic] of [['XAUUSD', 20261120], ['BTCUSD', 20261130]]) {
+    if (!S.map[sym] || EA.st.list.some(x => x.lib === 'litus' && x.sym === sym && x.acc === a.id)) continue;
+    made.push(EA.attach({ lib: 'litus', name: 'LITUS', sym, tf: 300, acc: a.id, inputs: magic === 20261120 ? {} : { InpMagic: magic } }));
+  }
+  return made;
+};
+function reloadSt() {
+  const st = U.load(K_ST, null); if (!st || !Array.isArray(st.list)) return;
+  EA.st = Object.assign({ v: 1, algo: true, list: [] }, st);
+  for (const id of Object.keys(R)) { const i = EA.inst(id); const r = R[id]; if (r && r.running && (!i || !i.run || !mine(i))) EA.stop(id, !i ? 'Dilepas di perangkat lain' : !i.run ? 'Dihentikan di perangkat lain' : 'Dipindahkan ke perangkat lain', !i || !i.run ? 1 : 9); }
+  U.emit('ea'); drawOverlay();
+}
+window.addEventListener('storage', e => { if (e.key === K_ST) reloadSt(); else if (e.key === K_LIB) { EA.lib = U.load(K_LIB, []) || []; U.emit('ea'); } else if (e.key === K_GV) GV = U.load(K_GV, {}) || {}; });
+document.addEventListener('amatu:change', e => { const d = e.detail || {}; const keys = (d.keys || (d.key ? [d.key] : [])).map(k => String(k).replace(/^ls:/, '')); if (!keys.length || keys.includes(K_ST)) setTimeout(reloadSt, 300); if (keys.includes(K_LIB)) { EA.lib = U.load(K_LIB, []) || []; U.emit('ea'); } if (keys.includes(K_GV)) GV = U.load(K_GV, {}) || {}; });
 EA.setAlgo = function (on) { EA.st.algo = !!on; saveSt(); for (const i of EA.st.list) EA.log(i.id, 'Algo Trading ' + (on ? 'ON' : 'OFF')); U.emit('ea'); drawOverlay(); };
 const tfName = s => (EA.TFS.find(x => x[0] === s) || [0, 'M' + Math.round(s / 60)])[1];
 EA.tfName = tfName;
@@ -674,7 +697,8 @@ setInterval(() => {
   if (!AT.isLeader()) { for (const inst of EA.st.list) { const r = R[inst.id]; if (r && r.running) EA.stop(inst.id, 'Pindah ke tab lain', 9); } return; }
   for (const inst of EA.st.list) {
     const r = R[inst.id];
-    if (inst.run && (!r || (!r.running && !r.starting && !r.err))) { if (EA.ready) EA.start(inst.id); continue; }
+    if (r && r.running && !mine(inst)) { EA.stop(inst.id, 'Dipindahkan ke perangkat lain', 9); continue; }
+    if (inst.run && mine(inst) && (!r || (!r.running && !r.starting && !r.err))) { if (!inst.dev) { inst.dev = DEV; saveSt(); } if (EA.ready) EA.start(inst.id); continue; }
     if (!r || !r.running || r.busy) continue;
     if (r.pendingTick && now - r.lastTick >= 150) { r.lastTick = now; r.pendingTick = false; call(inst.id, 'OnTick'); }
     if (r.X && r.X.timerMs && now >= r.X.nextTimer) { r.X.nextTimer = now + r.X.timerMs; call(inst.id, 'OnTimer'); }
@@ -755,6 +779,7 @@ EA.panel = function (el) {
       const bChart = U.el('button.btn.btn-ghost.sm', { type: 'button', html: U.icon('chart') + 'Chart' }); bChart.onclick = e => { e.stopPropagation(); if (AT.T.openSymbol) AT.T.openSymbol(inst.sym); };
       const bDel = U.el('button.icon-btn', { type: 'button', title: 'Lepas EA', html: U.icon('trash') });
       bDel.onclick = async e => { e.stopPropagation(); const ok = await U.confirm('Lepas ' + inst.name + '?', 'EA berhenti dan dilepas dari ' + U.esc(S.map[inst.sym].n) + '. Posisi dan pending order yang sudah ada tetap ada di akun.', 'Lepas', true); if (ok) EA.remove(inst.id); };
+      if (inst.run && !mine(inst)) { const bHere = U.el('button.btn.btn-ghost.sm', { type: 'button', html: U.icon('play') + 'Jalankan di sini' }); bHere.onclick = e => { e.stopPropagation(); EA.claim(inst.id); }; acts.append(bHere); }
       acts.append(bRun, bSet, bChart, U.el('span.grow'), bDel);
       card.append(acts);
       card.onclick = () => { selId = selId === inst.id ? null : inst.id; render(); };
@@ -777,7 +802,9 @@ EA.panel = function (el) {
       const acts = U.el('div.ea-acts');
       const bAdd = U.el('button.btn.btn-yellow.sm', { type: 'button', text: 'Pasang' }); bAdd.onclick = () => attachDialog(it);
       const bSrc = U.el('button.btn.btn-ghost.sm', { type: 'button', text: 'Kode' }); bSrc.onclick = () => showSource(it);
-      acts.append(bAdd, bSrc, U.el('span.grow'));
+      acts.append(bAdd);
+      if (it.id === 'litus') { const bBoth = U.el('button.btn.btn-yellow.sm', { type: 'button', text: 'Pasang XAU + BTC' }); bBoth.title = 'LITUS di XAU/USD M5 dan BTC M5 (preset AUTO, BTC magic 20261130) — sama seperti di MetaTrader 5'; bBoth.onclick = () => { const m = EA.setupLitus(); U.toast(m.length ? 'LITUS dipasang' : 'Sudah terpasang', m.length ? U.esc(m.map(x => S.map[x.sym].n + ' ' + tfName(x.tf)).join(' + ')) : 'LITUS sudah ada di XAU/USD dan BTC untuk akun ini', m.length ? 'ok' : 'info'); render(); }; acts.append(bBoth); }
+      acts.append(bSrc, U.el('span.grow'));
       if (!it.builtin) { const bDel = U.el('button.icon-btn', { type: 'button', title: 'Hapus dari pustaka', html: U.icon('trash') }); bDel.onclick = async () => { if (!(await U.confirm('Hapus ' + it.name + '?', 'File .mq5 ini dihapus dari pustaka.', 'Hapus', true))) return; if (!EA.removeLib(it.id)) U.toast('Masih terpasang', 'Lepas dulu EA yang memakai file ini.', 'warn'); render(); }; acts.append(bDel); }
       row.append(acts); box.append(row);
     }

@@ -500,7 +500,7 @@ tr:hover .star { display: inline-flex; }
 .ea-l2 { font-size: 12px; line-height: 1.45; margin-top: 4px; }
 .ea-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #6C7A83; }
 .ea-dot.on { background: var(--green); } .ea-dot.err { background: var(--red); } .ea-dot.wait { background: var(--yellow); }
-.ea-acts { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.ea-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 .ea-acts .btn.sm { height: 26px; padding: 0 8px; font-size: 12px; gap: 4px; } .ea-acts .btn .ic { width: 14px; height: 14px; }
 .ea-journal { max-height: 230px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; margin: -2px 0 6px; font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--text2); white-space: pre-wrap; word-break: break-word; }
 .ea-journal time { color: var(--text3, #6C7A83); } .ea-journal .err { color: var(--red); } .ea-journal .warn { color: var(--yellow); }
