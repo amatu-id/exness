@@ -192,6 +192,7 @@ E.open = function (a, o, at) {
   }
   const comm = commFor(a, sym, vol, px);
   const p = { id: String(++a.seq), sym: o.sym, side: o.side, vol, open: px, t: at ? at.t : Date.now(), tp, sl, swap: 0, comm, from: o.from || null };
+  if (o.magic) p.magic = +o.magic; if (o.cmt) p.cmt = String(o.cmt).slice(0, 31);
   a.pos.push(p);
   if (comm) a.bal = U.round(a.bal + comm, 2);
   a.chk = Math.max(a.chk || 0, at ? at.t : Date.now());
@@ -215,9 +216,10 @@ E.place = function (a, o) {
   const m = E.metrics(a);
   if (m.eq <= 0) return { err: ERR.money };
   const ord = { id: String(++a.oseq), sym: o.sym, side: o.side, kind, vol, price, tp, sl, t: Date.now(), exp: o.exp || null };
+  if (o.magic) ord.magic = +o.magic; if (o.cmt) ord.cmt = String(o.cmt).slice(0, 31);
   a.ord.push(ord);
   E.save(); U.emit('state');
-  E.notify({ kind: 'ok', title: 'Order placed', text: E.typeLabel(ord) + ' ' + U.fmt(vol, 2) + ' ' + sym.n + ' at ' + U.fmt(price, sym.dg), sym: o.sym, snd: 'open' });
+  if (!o.quiet) E.notify({ kind: 'ok', title: 'Order placed', text: E.typeLabel(ord) + ' ' + U.fmt(vol, 2) + ' ' + sym.n + ' at ' + U.fmt(price, sym.dg), sym: o.sym, snd: 'open' });
   return { ok: true, ord };
 };
 E.modifyPos = function (a, id, o) {
@@ -248,7 +250,7 @@ E.cancel = function (a, id, why) {
   const i = a.ord.findIndex(x => x.id === id); if (i < 0) return { err: 'Order not found' };
   const ord = a.ord.splice(i, 1)[0];
   const h = E.history(a.id);
-  h.unshift({ id: ord.id, ord: true, sym: ord.sym, side: ord.side, kind: ord.kind, vol: ord.vol, open: ord.price, close: null, tp: ord.tp, sl: ord.sl, t0: ord.t, t1: Date.now(), swap: 0, comm: 0, pl: 0, reason: why || 'Canceled' });
+  h.unshift({ id: ord.id, ord: true, sym: ord.sym, side: ord.side, kind: ord.kind, vol: ord.vol, open: ord.price, close: null, tp: ord.tp, sl: ord.sl, t0: ord.t, t1: Date.now(), swap: 0, comm: 0, pl: 0, reason: why || 'Canceled', magic: ord.magic || undefined });
   saveHist(a.id);
   E.save(); U.emit('state'); U.emit('hist', a.id);
   return { ok: true };
@@ -268,6 +270,7 @@ E.close = function (a, id, vol, reason, at) {
   const comm0 = U.round((p.comm || 0) * part, 2);
   const comm1 = commFor(a, sym, vol, px);
   const rec = { id: p.id, sym: p.sym, side: p.side, vol, open: p.open, close: px, tp: p.tp, sl: p.sl, t0: p.t, t1: at ? at.t : Date.now(), swap, comm: U.round(comm0 + comm1, 2), pl: U.round(pr, 2), reason: reason || '' };
+  if (p.magic) rec.magic = p.magic; if (p.cmt) rec.cmt = p.cmt;
   a.bal = U.round(a.bal + rec.pl + swap + comm1, 2);
   if (vol >= p.vol - 1e-9) a.pos.splice(i, 1);
   else { p.vol = U.round(p.vol - vol, 2); p.swap = U.round((p.swap || 0) - swap, 2); p.comm = U.round((p.comm || 0) - comm0, 2); }
@@ -316,10 +319,10 @@ E.check = function (ids) {
 function trigger(a, ord, fill, q, t, quiet) {
   const i = a.ord.indexOf(ord); if (i >= 0) a.ord.splice(i, 1);
   const sym = S.map[ord.sym];
-  const r = E.open(a, { sym: ord.sym, side: ord.side, vol: ord.vol, tp: ord.tp, sl: ord.sl, quiet: true, from: ord.id }, { q, px: U.round(fill, sym.dg), t });
+  const r = E.open(a, { sym: ord.sym, side: ord.side, vol: ord.vol, tp: ord.tp, sl: ord.sl, quiet: true, from: ord.id, magic: ord.magic, cmt: ord.cmt }, { q, px: U.round(fill, sym.dg), t });
   E.history(a.id).unshift({ id: ord.id, ord: true, sym: ord.sym, side: ord.side, kind: ord.kind, vol: ord.vol, open: ord.price, close: U.round(fill, sym.dg), tp: ord.tp, sl: ord.sl, t0: ord.t, t1: t, swap: 0, comm: 0, pl: 0, reason: 'Filled', pos: r.pos ? r.pos.id : null });
   saveHist(a.id);
-  if (!quiet) E.notify({ kind: 'ok', title: 'Pending order triggered', text: E.typeLabel(ord) + ' ' + U.fmt(ord.vol, 2) + ' ' + sym.n + ' at ' + U.fmt(fill, sym.dg), sym: ord.sym, snd: 'open' });
+  if (!quiet && !ord.magic) E.notify({ kind: 'ok', title: 'Pending order triggered', text: E.typeLabel(ord) + ' ' + U.fmt(ord.vol, 2) + ' ' + sym.n + ' at ' + U.fmt(fill, sym.dg), sym: ord.sym, snd: 'open' });
   return r;
 }
 function marginCheck(a, at) {
@@ -461,7 +464,9 @@ function metricsAt(a, pxOf) {
 }
 
 /* ---------- notifications ---------- */
+E.mute = false;
 E.notify = function (n) {
+  if (E.mute && n.kind !== 'error') return;
   n.t = Date.now(); n.id = U.uid(); n.read = false;
   E.notifs.unshift({ id: n.id, t: n.t, kind: n.kind, title: n.title, text: n.text, sym: n.sym, read: false });
   if (E.notifs.length > 100) E.notifs.length = 100;

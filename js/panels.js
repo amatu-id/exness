@@ -13,13 +13,13 @@ P.close = () => {
   side().classList.add('hidden'); cur = null; U.$$('#rail button').forEach(b => b.classList.remove('on')); AT.setUI('side', null); window.dispatchEvent(new Event('resize'));
 };
 P.open = function (k, init) {
+  if (U.isPhone() && !init && k !== 'inst' && k !== 'acct') AT.T.phShow('markets', true); // switch view first (it opens Instruments), then show k
   cur = k;
   const el = side(); el.classList.remove('hidden'); el.dataset.k = k;
   U.$$('#rail button').forEach(b => b.classList.toggle('on', b.dataset.p === k));
   el.innerHTML = '';
-  ({ inst, cal, alert: alerts, script, set: settings, acct })[k](el);
+  ({ inst, cal, alert: alerts, script, set: settings, acct, ea: x => AT.EA.panel(x) })[k](el);
   if (!init && !U.isPhone()) AT.setUI('side', k);
-  if (U.isPhone() && !init && k !== 'inst' && k !== 'acct') AT.T.phShow('markets', true);
   window.dispatchEvent(new Event('resize'));
 };
 function head(title, extra) {
@@ -133,6 +133,8 @@ async function loadCal() {
   return calData || [];
 }
 P.loadCal = loadCal;
+/* all calendar events (for Expert Advisors): t ms, imp 0..3, cur, title */
+P.calAll = () => (calData || []).map((e, i) => ({ id: i + 1, t: Date.parse(e.date), imp: IMP[e.impact] || 0, cur: e.country, title: e.title }));
 const IMP = { High: 3, Medium: 2, Low: 1, Holiday: 0 };
 /* currencies whose news moves an instrument */
 function cursOf(s) {
@@ -314,7 +316,7 @@ function acct(el) {
   for (const [k, l, ic] of [['deposit', 'Deposit', 'deposit'], ['withdraw', 'Withdraw', 'withdraw'], ['transfer', 'Transfer', 'transfer']]) { const b = U.el('button.bm-act', { type: 'button', html: '<i>' + U.icon(ic) + '</i><span>' + l + '</span>' }); b.onclick = () => AT.T.money(k); acts.append(b); }
   box.append(acts);
   const links = [['Switch account', 'wallet', () => { const items = E.st.accounts.filter(x => !x.archived).map(x => ({ label: '#' + x.id + ' · ' + S.ACCOUNT_TYPES[x.type].name + ' · ' + U.fmt(E.metrics(x).eq, 2) + ' ' + x.cur, active: x.id === a.id, onClick: () => { E.setActive(x.id); P.open('acct', true); } })); U.menu(box.querySelector('.ph-l0'), items, { minWidth: 280 }); }],
-    ['Personal Area', 'home', () => AT.go('#/pa/accounts')], ['Economic calendar', 'calendar', () => P.open('cal')], ['Price alerts', 'alarm', () => P.open('alert')], ['Script editor', 'braces', () => P.open('script')], ['Terminal settings', 'gear', () => P.open('set')], ['Back to Portal', 'arrow-left', () => { location.href = '/'; }]];
+    ['Personal Area', 'home', () => AT.go('#/pa/accounts')], ['Economic calendar', 'calendar', () => P.open('cal')], ['Price alerts', 'alarm', () => P.open('alert')], ['Script editor', 'braces', () => P.open('script')], ['Expert Advisors', 'robot', () => P.open('ea')], ['Terminal settings', 'gear', () => P.open('set')], ['Back to Portal', 'arrow-left', () => { location.href = '/'; }]];
   links.forEach(([l, ic, fn], i) => { const b = U.el('button.ph-link.ph-l' + i, { type: 'button', html: U.icon(ic) + '<span>' + l + '</span>' + U.icon('chev-right') }); b.onclick = fn; box.append(b); });
   el.append(box);
 }

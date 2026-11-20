@@ -29,6 +29,7 @@ T.mount = function (root) {
       <button type="button" data-p="cal" title="Economic calendar">${U.icon('calendar')}</button>
       <button type="button" data-p="alert" title="Price alerts">${U.icon('alarm')}</button>
       <button type="button" data-p="script" title="Script editor">${U.icon('braces')}</button>
+      <button type="button" data-p="ea" title="Expert Advisors (MetaTrader EA)">${U.icon('robot')}</button>
       <button type="button" data-p="set" title="Settings">${U.icon('gear')}</button>
     </aside>
     <section class="t-side hidden" id="side"></section>
