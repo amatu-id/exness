@@ -10,7 +10,7 @@ const K_ST = 'exness.ea', K_LIB = 'exness.ea.lib', K_GV = 'exness.ea.gv';
 const kLog = id => 'pt.exness.ea.log.' + id;
 
 const BUILTIN = [
-  { id: 'litus', name: 'LITUS', file: 'ea/LITUS.mq5', sym: 'XAUUSD', tf: 300, desc: 'Tangga BUY STOP + SELL STOP $1, lot berlipat berpasangan (0.01 0.01 0.02 0.02 …), keluar basket dengan Break-Even + Trailing, Risk Guard, filter jam/spread/ATR/berita.' },
+  { id: 'litus', name: 'LITUS', file: 'ea/LITUS.mq5', sym: 'BTCUSD', tf: 300, desc: 'v1.04: stop order searah tren EMA200 H1, satu arah (sisi lawan dihapus begitu terisi), SL server 2 step yang ikut naik ke kunci Break-Even/Trailing, Risk Guard. Preset AUTO BTC: 1 level $50, SL $100 (backtest tick nyata 15 Agu–21 Nov: +6,9%, PF 1,17). XAU belum disarankan (Nov −92%).' },
   { id: 'macross', name: 'MA Cross', file: 'ea/MACross.mq5', tf: 900, desc: 'Contoh EA sederhana: EMA cepat memotong EMA lambat → buka posisi dengan SL/TP tetap.' }
 ];
 EA.BUILTIN = BUILTIN;
@@ -459,8 +459,8 @@ function makeEnv(inst) {
     },
     OrderSendAsync: (req, res) => env.OrderSend(req, res),
     // ---- history (closed positions → deals)
-    HistorySelect: () => true, HistorySelectByPosition: () => true,
-    HistoryDealsTotal: () => { X.deals = (E.history(inst.acc) || []).filter(h => !h.ord); return X.deals.length; },
+    HistorySelect: (f, t) => { X.hf = +f || 0; X.ht = +t || 0; return true; }, HistorySelectByPosition: () => { X.hf = X.ht = 0; return true; },
+    HistoryDealsTotal: () => { X.deals = (E.history(inst.acc) || []).filter(h => !h.ord && (!X.ht || (h.t1 / 1000 >= X.hf && h.t1 / 1000 <= X.ht))); return X.deals.length; },
     HistoryDealGetTicket: i => { const d = (X.deals || [])[i]; X.selDeal = d || null; return d ? (+d.id) * 10 + 1 : 0; },
     HistoryDealSelect: t => { const d = (X.deals || E.history(inst.acc).filter(h => !h.ord)).find(h => (+h.id) * 10 + 1 === +t); X.selDeal = d || null; return !!d; },
     HistoryDealGetDouble: (t, prop, box) => { const d = dealOf(t); if (!d) return out(box, 0); return out(box, { DEAL_PROFIT: d.pl, DEAL_VOLUME: d.vol, DEAL_PRICE: d.close, DEAL_SWAP: d.swap || 0, DEAL_COMMISSION: d.comm || 0, DEAL_FEE: 0 }[prop] || 0); },
@@ -598,10 +598,10 @@ EA.toggleRun = function (id) {
 };
 /* move a running EA to this device (the other device stops it when it sees the change) */
 EA.claim = function (id) { const inst = EA.inst(id); if (!inst) return; inst.dev = DEV; inst.run = true; saveSt(); EA.log(id, 'Dipindahkan ke perangkat ini'); if (AT.isLeader()) EA.start(id); U.emit('ea'); };
-/* one click: LITUS on XAU/USD M5 + BTC M5 like the MT5 setup (BTC uses its own magic) */
+/* one click: LITUS v1.04 on BTC M5 like the MT5 setup (XAU dropped: every variant lost ~92% in Nov 2026 backtests) */
 EA.setupLitus = function () {
   const a = E.active(); const made = [];
-  for (const [sym, magic] of [['XAUUSD', 20261120], ['BTCUSD', 20261130]]) {
+  for (const [sym, magic] of [['BTCUSD', 20261130]]) {
     if (!S.map[sym] || EA.st.list.some(x => x.lib === 'litus' && x.sym === sym && x.acc === a.id)) continue;
     made.push(EA.attach({ lib: 'litus', name: 'LITUS', sym, tf: 300, acc: a.id, inputs: magic === 20261120 ? {} : { InpMagic: magic } }));
   }
@@ -803,7 +803,7 @@ EA.panel = function (el) {
       const bAdd = U.el('button.btn.btn-yellow.sm', { type: 'button', text: 'Pasang' }); bAdd.onclick = () => attachDialog(it);
       const bSrc = U.el('button.btn.btn-ghost.sm', { type: 'button', text: 'Kode' }); bSrc.onclick = () => showSource(it);
       acts.append(bAdd);
-      if (it.id === 'litus') { const bBoth = U.el('button.btn.btn-yellow.sm', { type: 'button', text: 'Pasang XAU + BTC' }); bBoth.title = 'LITUS di XAU/USD M5 dan BTC M5 (preset AUTO, BTC magic 20261130) — sama seperti di MetaTrader 5'; bBoth.onclick = () => { const m = EA.setupLitus(); U.toast(m.length ? 'LITUS dipasang' : 'Sudah terpasang', m.length ? U.esc(m.map(x => S.map[x.sym].n + ' ' + tfName(x.tf)).join(' + ')) : 'LITUS sudah ada di XAU/USD dan BTC untuk akun ini', m.length ? 'ok' : 'info'); render(); }; acts.append(bBoth); }
+      if (it.id === 'litus') { const bBoth = U.el('button.btn.btn-yellow.sm', { type: 'button', text: 'Pasang BTC' }); bBoth.title = 'LITUS v1.04 di BTC M5 (preset AUTO: 1 level $50, SL $100, searah EMA200 H1) — sama seperti di MetaTrader 5'; bBoth.onclick = () => { const m = EA.setupLitus(); U.toast(m.length ? 'LITUS dipasang' : 'Sudah terpasang', m.length ? U.esc(m.map(x => S.map[x.sym].n + ' ' + tfName(x.tf)).join(' + ')) : 'LITUS sudah ada di BTC untuk akun ini', m.length ? 'ok' : 'info'); render(); }; acts.append(bBoth); }
       acts.append(bSrc, U.el('span.grow'));
       if (!it.builtin) { const bDel = U.el('button.icon-btn', { type: 'button', title: 'Hapus dari pustaka', html: U.icon('trash') }); bDel.onclick = async () => { if (!(await U.confirm('Hapus ' + it.name + '?', 'File .mq5 ini dihapus dari pustaka.', 'Hapus', true))) return; if (!EA.removeLib(it.id)) U.toast('Masih terpasang', 'Lepas dulu EA yang memakai file ini.', 'warn'); render(); }; acts.append(bDel); }
       row.append(acts); box.append(row);

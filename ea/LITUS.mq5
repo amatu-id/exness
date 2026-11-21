@@ -14,9 +14,16 @@
 //|     Trailing Stop, Volatility Check, Session Scanner             |
 //|  Aturan keluar persis tidak terlihat di video -> di sini dibuat  |
 //|  sebagai BE + trailing basket (input bisa diubah).               |
+//|                                                                  |
+//|  v1.04 hasil belajar history live 20-21 Nov (158 basket):        |
+//|   - basket SATU ARAH : 134x, +Rp1,27jt (avg +15,5rb / -2,9rb)    |
+//|   - basket DUA SISI terisi (hedge terkunci): 24x, -Rp2,05jt,     |
+//|     + bencana Mac sleep -Rp7,5jt juga dua sisi                   |
+//|   -> Satu Arah: sisi pertama terisi = pending lawan dihapus,     |
+//|      SL server di tiap posisi, ikut naik ke kunci BE/trailing.   |
 //+------------------------------------------------------------------+
 #property copyright   "LITUS"
-#property version     "1.02"
+#property version     "1.04"
 #property description "LITUS: tangga BUY STOP + SELL STOP, lot berlipat berpasangan (pyramid searah gerakan)."
 #property description "Keluar per basket: Break-Even + Trailing profit, Risk Guard rugi basket & harian."
 #property description "Filter: jam London/NY, spread, volatilitas ATR, berita high-impact (kalender MT5)."
@@ -91,15 +98,31 @@ input ulong    InpMagic         = 20261120; // Magic number
 input int      InpSlippage      = 30;     // Deviasi (point)
 input bool     InpShowPanel     = true;   // Tampilkan panel
 
+input group "=== Pengaman bila MT5/Mac mati (sleep, putus) ==="
+// v1.03: order STOP ada di server, tetap terpicu walau MT5 beku (Mac ditutup) -> basket tanpa pengelola.
+input int      InpPendExpiryMin = 10;     // Pending kedaluwarsa di SERVER bila EA tidak memperpanjang (menit, 0 = GTC)
+input double   InpEmergSteps    = 10;     // SL darurat di server tiap order = N x jarak level (0 = off)
+
+input group "=== v1.04 Satu Arah (hasil belajar history) ==="
+input bool     InpOneWay        = true;   // Sisi pertama terisi -> hapus semua pending sisi lawan (tidak pernah hedge terkunci)
+input double   InpSLSteps       = 2.0;    // SL server: level terisi terjauh -/+ N x jarak level (0 = off, pakai SL darurat)
+input bool     InpSLFollowLock  = true;   // SL server ikut naik ke harga kunci BE/trailing (aman walau MT5 mati)
+input ENUM_TIMEFRAMES InpTrendTF = PERIOD_H1; // Filter tren: TF EMA
+input int      InpTrendEMA      = 0;      // Filter tren: periode EMA (0 = off). Harga > EMA = hanya BUY STOP, < EMA = hanya SELL STOP
+input int      InpLossCooldownSec = 0;    // Jeda setelah basket RUGI (detik) - kurangi churn di pasar choppy
+
 //--- globals --------------------------------------------------------
 // v1.02: angka dalam satuan harga dipakai lewat P_* (hasil preset), bukan langsung dari input
 double   P_Step, P_Start, P_MaxSpread, P_ATRMin, P_ATRMax, P_BETrig, P_BELock, P_TrailStart, P_TrailMaxGive, P_BasketTP;
 bool     P_UseTime, P_Weekend;
+int      P_Levels, P_TrendEMA;      // v1.04
+double   P_TrailGive;
 int      P_FridayStop;
 string   g_preset = "MANUAL";
 CTrade   trade;
 string   g_sym;
 int      g_atr = INVALID_HANDLE;
+int      g_ema = INVALID_HANDLE;
 double   g_peak = 0;            // untung puncak basket (mata uang akun)
 datetime g_basketStart = 0;
 bool     g_hadPos = false;
@@ -116,6 +139,9 @@ string   st_news = "ACTIVE", st_time = "", st_spread = "", st_vol = "", st_lot =
 string   st_be = "ON", st_trail = "ON", st_risk = "ENABLED", st_block = "";
 double   g_lock = 0;
 bool     g_lockOn = false;
+datetime g_lastProc = 0;        // v1.03: deteksi jeda (MT5 beku / Mac sleep)
+datetime g_lastKeep = 0;
+string   g_lastWhy = "#";
 // cache berita
 datetime g_newsT[];
 string   g_newsN[];
@@ -128,14 +154,19 @@ void ResolvePreset()
    P_Step = InpStep; P_Start = InpStartDist; P_MaxSpread = InpMaxSpread; P_ATRMin = InpATRMin; P_ATRMax = InpATRMax;
    P_BETrig = InpBETrigger; P_BELock = InpBELock; P_TrailStart = InpTrailStart; P_TrailMaxGive = InpTrailMaxGive; P_BasketTP = InpBasketTP;
    P_UseTime = InpUseTime; P_FridayStop = InpFridayStop; P_Weekend = InpWeekend;
+   P_Levels = InpLevels; P_TrendEMA = InpTrendEMA; P_TrailGive = InpTrailGiveback;
    g_preset = "MANUAL";
    if(InpPreset != LP_AUTO) return;
    string s = g_sym;
    StringToUpper(s);
    if(StringFind(s, "BTC") >= 0)
    {
-      P_Step = 25; P_Start = 25; P_MaxSpread = 12; P_ATRMin = 10; P_ATRMax = 250;
-      P_BETrig = 15; P_BELock = 4; P_TrailStart = 30;
+      // v1.04 dari backtest tick nyata 15 Agu-21 Nov 2026 (IS s/d 1 Okt, OOS sesudahnya, keduanya untung):
+      // 1 level, jarak $50, SL 2 step ($100), BE 30/5, trailing dari 60 lepas 50%, hanya searah EMA200 H1.
+      // (v1.03: 20 level x $25, BE 15/4, trail 30 -> -91% di 20 Okt-11 Nov)
+      P_Step = 50; P_Start = 50; P_MaxSpread = 12; P_ATRMin = 10; P_ATRMax = 500;
+      P_BETrig = 30; P_BELock = 5; P_TrailStart = 60; P_TrailGive = 50;
+      P_Levels = 1; P_TrendEMA = 200;
       P_TrailMaxGive = InpTrailMaxGive * 25; P_BasketTP = InpBasketTP * 25;
       P_UseTime = false; P_FridayStop = 0; P_Weekend = true;
       g_preset = "AUTO BTC";
@@ -275,6 +306,7 @@ bool CloseAll(string why)
       g_peak = 0; g_lockOn = false; g_hadPos = false; g_basketStart = 0;
       GlobalVariableDel(g_gvPeak); GlobalVariableDel(g_gvStart);
       g_cooldown = TimeCurrent() + InpCooldownSec;
+      if(InpLossCooldownSec > 0 && pr < 0) g_cooldown = TimeCurrent() + InpLossCooldownSec;
    }
    return done;
 }
@@ -376,6 +408,140 @@ double MarginEst(double vol, double px)
    return vol * px / (double)lev * tv / ts;
 }
 
+// v1.03: kedaluwarsa pending di server
+bool ExpiryOK()
+{
+   if(InpPendExpiryMin <= 0) return false;
+   long m = SymbolInfoInteger(g_sym, SYMBOL_EXPIRATION_MODE);
+   return (m & SYMBOL_EXPIRATION_SPECIFIED) != 0;
+}
+datetime ExpiryTime() { return TimeCurrent() + InpPendExpiryMin * 60; }
+
+// perpanjang kedaluwarsa pending selama EA hidup (tiap 30 detik cek, perpanjang bila sisa < separuh)
+void KeepPendAlive()
+{
+   if(!ExpiryOK() || TimeCurrent() - g_lastKeep < 30) return;
+   g_lastKeep = TimeCurrent();
+   datetime lim = TimeCurrent() + InpPendExpiryMin * 30;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong t = OrderGetTicket(i);
+      if(t == 0 || !OrderSelect(t)) continue;
+      if(!IsMine(OrderGetInteger(ORDER_MAGIC), OrderGetString(ORDER_SYMBOL))) continue;
+      datetime ex = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
+      if(OrderGetInteger(ORDER_TYPE_TIME) == ORDER_TIME_SPECIFIED && ex > lim) continue;
+      if(!trade.OrderModify(t, OrderGetDouble(ORDER_PRICE_OPEN), OrderGetDouble(ORDER_SL), OrderGetDouble(ORDER_TP),
+                            ORDER_TIME_SPECIFIED, ExpiryTime()))
+         PrintFormat("LITUS: gagal perpanjang order %I64u ret=%u %s", t, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+   }
+}
+
+// SL darurat untuk posisi LITUS yang belum punya SL (mis. basket lama sebelum v1.03)
+void EnsureEmergSL()
+{
+   if(InpEmergSteps <= 0) return;
+   double d = InpEmergSteps * P_Step;
+   double minStop = (double)SymbolInfoInteger(g_sym, SYMBOL_TRADE_STOPS_LEVEL) * Pt();
+   double bid = SymbolInfoDouble(g_sym, SYMBOL_BID), ask = SymbolInfoDouble(g_sym, SYMBOL_ASK);
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if(!IsMine(PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL))) continue;
+      if(PositionGetDouble(POSITION_SL) > 0) continue;
+      double op = PositionGetDouble(POSITION_PRICE_OPEN), sl;
+      if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) sl = NP(MathMin(op - d, bid - minStop - Pt()));
+      else sl = NP(MathMax(op + d, ask + minStop + Pt()));
+      if(!trade.PositionModify(t, sl, PositionGetDouble(POSITION_TP)))
+         PrintFormat("LITUS: gagal pasang SL darurat %I64u ret=%u %s", t, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+   }
+}
+
+// v1.04: hapus pending satu jenis (BUY STOP / SELL STOP)
+int DeletePendType(ENUM_ORDER_TYPE typ)
+{
+   int n = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+   {
+      ulong t = OrderGetTicket(i);
+      if(t == 0 || !OrderSelect(t)) continue;
+      if(!IsMine(OrderGetInteger(ORDER_MAGIC), OrderGetString(ORDER_SYMBOL))) continue;
+      if(OrderGetInteger(ORDER_TYPE) != typ) continue;
+      if(trade.OrderDelete(t)) n++;
+      else PrintFormat("LITUS: gagal hapus order %I64u ret=%u %s", t, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+   }
+   return n;
+}
+
+// v1.04: SL server per sisi = max(level terisi terjauh - N x step, harga kunci BE/trailing). Tidak pernah dilonggarkan.
+void SyncSL(int nb, int ns)
+{
+   if(InpSLSteps <= 0 && !InpSLFollowLock) return;
+   double tv = SymbolInfoDouble(g_sym, SYMBOL_TRADE_TICK_VALUE), ts = TickSz();
+   double vpp = (tv > 0 && ts > 0) ? tv / ts : 0;        // uang per 1.0 harga per 1 lot
+   double minStop = (double)MathMax(SymbolInfoInteger(g_sym, SYMBOL_TRADE_STOPS_LEVEL), SymbolInfoInteger(g_sym, SYMBOL_TRADE_FREEZE_LEVEL)) * Pt();
+   double bid = SymbolInfoDouble(g_sym, SYMBOL_BID), ask = SymbolInfoDouble(g_sym, SYMBOL_ASK);
+   double minMove = MathMax(5 * TickSz(), 0.05 * P_Step);
+   for(int side = 0; side < 2; side++)
+   {
+      bool isB = side == 0;
+      if((isB ? nb : ns) == 0) continue;
+      double sumL = 0, sumLO = 0, ext = isB ? -DBL_MAX : DBL_MAX;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0 || !PositionSelectByTicket(t)) continue;
+         if(!IsMine(PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL))) continue;
+         if((PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) != isB) continue;
+         double v = PositionGetDouble(POSITION_VOLUME), op = PositionGetDouble(POSITION_PRICE_OPEN);
+         sumL += v; sumLO += v * op;
+         ext = isB ? MathMax(ext, op) : MathMin(ext, op);
+      }
+      if(sumL <= 0) continue;
+      double want = 0;
+      if(InpSLSteps > 0) want = isB ? ext - InpSLSteps * P_Step : ext + InpSLSteps * P_Step;
+      // kunci BE/trailing basket -> harga di mana P/L basket = kunci (hanya bila satu sisi saja)
+      if(InpSLFollowLock && g_lockOn && vpp > 0 && (nb == 0 || ns == 0))
+      {
+         double lp = isB ? (g_lock / vpp + sumLO) / sumL : (sumLO - g_lock / vpp) / sumL;
+         if(want == 0) want = lp;
+         else want = isB ? MathMax(want, lp) : MathMin(want, lp);
+      }
+      if(want <= 0) continue;
+      // batas stops level: kalau terlalu dekat harga, EA yang menutup (ManageBasket), SL dipasang sedekat mungkin
+      if(isB) want = MathMin(want, bid - minStop - Pt());
+      else    want = MathMax(want, ask + minStop + Pt());
+      want = NP(want);
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong t = PositionGetTicket(i);
+         if(t == 0 || !PositionSelectByTicket(t)) continue;
+         if(!IsMine(PositionGetInteger(POSITION_MAGIC), PositionGetString(POSITION_SYMBOL))) continue;
+         if((PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) != isB) continue;
+         double cur = PositionGetDouble(POSITION_SL);
+         bool better = cur <= 0 || (isB ? want >= cur + minMove : want <= cur - minMove);
+         if(!better) continue;
+         if(!trade.PositionModify(t, want, PositionGetDouble(POSITION_TP)))
+            PrintFormat("LITUS: gagal geser SL %I64u ke %.2f ret=%u %s", t, want, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+// v1.04: P/L basket yang ditutup server (SL) / manual, dari history deal
+double ClosedPL(datetime from)
+{
+   double pl = 0;
+   if(from <= 0 || !HistorySelect(from - 5, TimeCurrent() + 5)) return 0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+   {
+      ulong d = HistoryDealGetTicket(i);
+      if(d == 0) continue;
+      if(!IsMine(HistoryDealGetInteger(d, DEAL_MAGIC), HistoryDealGetString(d, DEAL_SYMBOL))) continue;
+      pl += HistoryDealGetDouble(d, DEAL_PROFIT) + HistoryDealGetDouble(d, DEAL_SWAP) + HistoryDealGetDouble(d, DEAL_COMMISSION);
+   }
+   return pl;
+}
+
 //+------------------------------------------------------------------+
 void PlaceGrid()
 {
@@ -386,7 +552,7 @@ void PlaceGrid()
    double start = MathMax(P_Start, minStop + Pt());
 
    // Risk Guard: berapa level muat di margin (asumsi seluruh satu sisi terisi)
-   int n = MathMax(1, InpLevels);
+   int n = MathMax(1, P_Levels);
    long lim = AccountInfoInteger(ACCOUNT_LIMIT_ORDERS);
    int sides = InpBothSides ? 2 : 1;
    if(lim > 0) n = (int)MathMin(n, (lim - PositionsTotal() - OrdersTotal()) / sides);
@@ -418,28 +584,48 @@ void PlaceGrid()
 
    bool doB = InpBothSides || InpOnlySide == 0;
    bool doS = InpBothSides || InpOnlySide == 1;
+   if(g_ema != INVALID_HANDLE)
+   {  // v1.04: hanya searah tren
+      double e[1];
+      if(BarsCalculated(g_ema) < P_TrendEMA || CopyBuffer(g_ema, 0, 1, 1, e) != 1 || e[0] <= 0 || e[0] == EMPTY_VALUE)
+      {  // EMA belum siap -> jangan menebak arah
+         static datetime w = 0;
+         if(TimeCurrent() - w > 3600) { w = TimeCurrent(); PrintFormat("LITUS: EMA tren belum siap (bars %d)", BarsCalculated(g_ema)); }
+         return;
+      }
+      static datetime dbg = 0;
+      if(MQLInfoInteger(MQL_TESTER) && TimeCurrent() - dbg > 86400) { dbg = TimeCurrent(); PrintFormat("LITUS dbg EMA %.2f mid %.2f", e[0], (ask + bid) / 2); }
+      double mid = (ask + bid) / 2;
+      if(mid > e[0]) doS = false; else doB = false;
+      if(!doB && !doS) return;
+   }
    double b0 = NP(ask + start), s0 = NP(bid - start);
    int placed = 0;
+   bool useEx = ExpiryOK();
+   ENUM_ORDER_TYPE_TIME tt = useEx ? ORDER_TIME_SPECIFIED : ORDER_TIME_GTC;
+   datetime ex = useEx ? ExpiryTime() : 0;
+   double ed = InpEmergSteps > 0 ? InpEmergSteps * P_Step : 0;
+   if(InpSLSteps > 0) ed = InpSLSteps * P_Step;     // v1.04: tiap pending langsung bawa SL basket
    for(int i = 0; i < allowed; i++)
    {
       double l = LotAt(i, base);
       if(doB)
       {
          double p = NP(b0 + i * P_Step);
-         if(trade.BuyStop(l, p, g_sym, 0, 0, ORDER_TIME_GTC, 0, StringFormat("LITUS B%d", i + 1))) placed++;
+         if(trade.BuyStop(l, p, g_sym, ed > 0 ? NP(p - ed) : 0, 0, tt, ex, StringFormat("LITUS B%d", i + 1))) placed++;
          else if(CheckFail()) return;
       }
       if(doS)
       {
          double p = NP(s0 - i * P_Step);
-         if(trade.SellStop(l, p, g_sym, 0, 0, ORDER_TIME_GTC, 0, StringFormat("LITUS S%d", i + 1))) placed++;
+         if(trade.SellStop(l, p, g_sym, ed > 0 ? NP(p + ed) : 0, 0, tt, ex, StringFormat("LITUS S%d", i + 1))) placed++;
          else if(CheckFail()) return;
       }
    }
-   PrintFormat("LITUS: tangga baru %d order (%d level/sisi, lot dasar %.2f, total %.2f lot/sisi) Ask %.2f Bid %.2f",
-               placed, allowed, base, cum, ask, bid);
-   if(allowed < InpLevels)
-      PrintFormat("LITUS: Risk Guard memotong level %d -> %d (margin/limit)", InpLevels, allowed);
+   PrintFormat("LITUS: tangga baru %d order (%d level/sisi, lot dasar %.2f, total %.2f lot/sisi) Ask %.2f Bid %.2f, kedaluwarsa %s, SL %.2f",
+               placed, allowed, base, cum, ask, bid, useEx ? IntegerToString(InpPendExpiryMin) + " mnt" : "GTC", ed);
+   if(allowed < P_Levels)
+      PrintFormat("LITUS: Risk Guard memotong level %d -> %d (margin/limit)", P_Levels, allowed);
 }
 
 // true = hentikan pemasangan
@@ -470,7 +656,7 @@ void ManageBasket(double profit)
    else st_be = InpUseBE ? "ON" : "OFF";
    if(InpUseTrail && g_peak >= MoneyOf(P_TrailStart))
    {
-      double give = g_peak * InpTrailGiveback / 100.0;
+      double give = g_peak * P_TrailGive / 100.0;
       if(P_TrailMaxGive > 0) give = MathMin(give, MoneyOf(P_TrailMaxGive));
       double tl = g_peak - give;
       if(!on || tl > lock) lock = tl;
@@ -514,9 +700,32 @@ void Process()
    int np = CountPos(profit, lb, ls, nb, ns);
    int pb, ps;
    int no = CountPend(pb, ps);
+   // v1.03: EA sempat tidak jalan (Mac sleep / MT5 beku) -> catat, tangga kosong lama dibangun ulang
+   if(g_lastProc > 0 && TimeCurrent() - g_lastProc > 120)
+   {
+      PrintFormat("LITUS: EA tidak berjalan %d detik (Mac sleep / MT5 beku / putus). Posisi %d, pending %d",
+                  (int)(TimeCurrent() - g_lastProc), np, no);
+      if(np == 0 && no > 0) { DeletePend(); no = CountPend(pb, ps); }
+   }
+   g_lastProc = TimeCurrent();
+   KeepPendAlive();
+   if(np > 0 && InpOneWay)
+   {  // v1.04: sisi pertama terisi -> pending lawan dihapus (data: dua sisi terisi = sumber semua rugi besar)
+      int d = 0;
+      if(nb > 0 && ps > 0) d += DeletePendType(ORDER_TYPE_SELL_STOP);
+      if(ns > 0 && pb > 0) d += DeletePendType(ORDER_TYPE_BUY_STOP);
+      if(d > 0) { PrintFormat("LITUS: satu arah %s, %d pending lawan dihapus", nb > 0 ? "BUY" : "SELL", d); no = CountPend(pb, ps); }
+   }
+   if(np > 0) { EnsureEmergSL(); SyncSL(nb, ns); }
    string why = "";
    bool ok = FiltersOK(why);
    st_block = why;
+   if(why != g_lastWhy)
+   {  // v1.03: alasan menahan entry tercatat di log Experts (dulu hanya di panel)
+      if(why == "") Print("LITUS: filter OK, entry aktif");
+      else PrintFormat("LITUS: tahan entry baru: %s (%s | %s | spread %s)", why, st_vol, st_time, st_spread);
+      g_lastWhy = why;
+   }
 
    if(np > 0)
    {
@@ -526,11 +735,15 @@ void Process()
    else
    {
       if(g_hadPos)
-      {  // basket berakhir di luar EA (SL manual / stop out) -> bersihkan
+      {  // basket berakhir di luar EA (SL server / manual / stop out) -> bersihkan
+         double cpl = ClosedPL(g_basketStart);
+         PrintFormat("LITUS: tutup basket (SL server/manual) P/L %.2f puncak %.2f", cpl, g_peak);
+         g_lastClose = StringFormat("%s SL %.2f", TimeToString(TimeCurrent(), TIME_MINUTES), cpl);
          if(no > 0) DeletePend();
          g_hadPos = false; g_peak = 0; g_lockOn = false; g_basketStart = 0;
          GlobalVariableDel(g_gvPeak); GlobalVariableDel(g_gvStart);
          g_cooldown = TimeCurrent() + InpCooldownSec;
+         if(InpLossCooldownSec > 0 && cpl < 0) g_cooldown = TimeCurrent() + InpLossCooldownSec;
          no = CountPend(pb, ps);
       }
       st_be = InpUseBE ? "ON" : "OFF"; st_trail = InpUseTrail ? "ON" : "OFF";
@@ -579,7 +792,7 @@ void Panel(double profit, double lb, double ls, int nb, int ns, int pb, int ps)
       ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, 8);
       ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, 20);
       ObjectSetInteger(0, bg, OBJPROP_XSIZE, 360);
-      ObjectSetInteger(0, bg, OBJPROP_YSIZE, 20 * 17 + 14);
+      ObjectSetInteger(0, bg, OBJPROP_YSIZE, 21 * 17 + 14);
       ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, C'18,22,30');
       ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
       ObjectSetInteger(0, bg, OBJPROP_COLOR, C'255,176,32');
@@ -589,7 +802,7 @@ void Panel(double profit, double lb, double ls, int nb, int ns, int pb, int ps)
    color ok = C'110,231,183', warn = C'251,191,36', bad = C'248,113,113', txt = C'226,232,240', gold = C'255,176,32';
    string cur = AccountInfoString(ACCOUNT_CURRENCY);
    int r = 0;
-   Lbl(r++, "LITUS  v1.02   " + g_sym, gold, 11, "Arial Black");
+   Lbl(r++, "LITUS  v1.04   " + g_sym, gold, 11, "Arial Black");
    Lbl(r++, "● " + st_state, StringFind(st_state, "MENUNGGU") == 0 || st_state == "MARGIN KURANG" ? warn : ok, 9);
    Lbl(r++, "> Auto Entry: " + (st_block == "" ? "ON" : "TAHAN (" + st_block + ")"), st_block == "" ? ok : warn);
    Lbl(r++, "> News Filter: " + st_news, StringFind(st_news, "BLOK") == 0 ? bad : ok);
@@ -601,13 +814,14 @@ void Panel(double profit, double lb, double ls, int nb, int ns, int pb, int ps)
    Lbl(r++, "> Trailing Stop: " + st_trail, st_trail == "AKTIF" ? gold : ok);
    Lbl(r++, "> Volatility Check: " + st_vol, StringFind(st_vol, "OK") == 0 ? ok : warn);
    Lbl(r++, "> Session Scanner: " + (st_block == "" ? "LIVE" : "PAUSE"), st_block == "" ? ok : warn);
+   Lbl(r++, StringFormat("> Satu Arah: %s  SL %.1f step%s", InpOneWay ? "ON" : "OFF", InpSLSteps, InpSLFollowLock ? " + ikut kunci" : ""), InpOneWay ? ok : warn);
    Lbl(r++, StringFormat("Posisi  BUY %d (%.2f lot)  SELL %d (%.2f lot)", nb, lb, ns, ls), txt);
    Lbl(r++, StringFormat("Pending BUY STOP %d  SELL STOP %d", pb, ps), txt);
    Lbl(r++, StringFormat("Basket P/L %s %s", DoubleToString(profit, 2), cur), profit >= 0 ? ok : bad);
    Lbl(r++, StringFormat("Puncak %s   Kunci %s", DoubleToString(g_peak, 2), g_lockOn ? DoubleToString(g_lock, 2) : "-"), txt);
    Lbl(r++, StringFormat("Hari ini %s %s%s", DoubleToString(g_dayPL, 2), cur, g_dayStop ? "  STOP" : ""), g_dayPL >= 0 ? ok : bad);
    Lbl(r++, "Terakhir: " + g_lastClose, txt, 8);
-   Lbl(r++, StringFormat("%s · tangga %d lvl x %.2f  lot %.2f..%.2f", g_preset, InpLevels, P_Step, LotAt(0, BaseLot()), LotAt(InpLevels - 1, BaseLot())), txt, 8);
+   Lbl(r++, StringFormat("%s · tangga %d lvl x %.2f  lot %.2f..%.2f", g_preset, P_Levels, P_Step, LotAt(0, BaseLot()), LotAt(P_Levels - 1, BaseLot())), txt, 8);
    ChartRedraw(0);
 }
 
@@ -624,12 +838,13 @@ int OnInit()
       return INIT_FAILED;
    }
    ResolvePreset();
-   if(P_Step <= 0 || InpLevels < 1) { Alert("LITUS: P_Step/InpLevels tidak valid"); return INIT_PARAMETERS_INCORRECT; }
+   if(P_Step <= 0 || P_Levels < 1) { Alert("LITUS: P_Step/InpLevels tidak valid"); return INIT_PARAMETERS_INCORRECT; }
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFillingBySymbol(g_sym);
    trade.SetMarginMode();
    g_atr = InpUseATR ? iATR(g_sym, InpATRTF, InpATRPeriod) : INVALID_HANDLE;
+   g_ema = P_TrendEMA > 0 ? iMA(g_sym, InpTrendTF, P_TrendEMA, 0, MODE_EMA, PRICE_CLOSE) : INVALID_HANDLE;
    string key = StringFormat("LITUS_%I64d_%s_%I64u_", AccountInfoInteger(ACCOUNT_LOGIN), g_sym, InpMagic);
    g_gvPeak = key + "peak"; g_gvStart = key + "start";
    double pr, lb, ls; int nb, ns;
@@ -648,8 +863,8 @@ int OnInit()
    }
    g_day = -1;
    EventSetTimer(1);
-   PrintFormat("LITUS v1.02 %s [%s]: %d level x %.2f, start %.2f, lot %.2f x%.1f tiap %d level (maks %.2f)",
-               g_sym, g_preset, InpLevels, P_Step, P_Start, InpBaseLot, InpLotMult, InpLotRepeat, InpMaxLot);
+   PrintFormat("LITUS v1.04 %s [%s]: %d level x %.2f, start %.2f, lot %.2f x%.1f tiap %d level (maks %.2f), satu arah %s SL %.1f step, EMA tren %d",
+               g_sym, g_preset, P_Levels, P_Step, P_Start, InpBaseLot, InpLotMult, InpLotRepeat, InpMaxLot, InpOneWay ? "ON" : "OFF", InpSLSteps, P_TrendEMA);
    Process();
    return INIT_SUCCEEDED;
 }
@@ -658,6 +873,7 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    if(g_atr != INVALID_HANDLE) IndicatorRelease(g_atr);
+   if(g_ema != INVALID_HANDLE) IndicatorRelease(g_ema);
    ObjectsDeleteAll(0, PFX);
    // EA dilepas dari chart: jangan tinggalkan tangga pending tanpa pengelola
    if(reason == REASON_REMOVE || reason == REASON_CHARTCLOSE)
@@ -665,6 +881,15 @@ void OnDeinit(const int reason)
       DeletePend();
       Print("LITUS dilepas: semua pending LITUS dihapus (posisi terbuka dibiarkan)");
    }
+}
+
+// v1.04: kriteria optimasi = recovery factor (profit / DD equity), basket sedikit dipenalti
+double OnTester()
+{
+   double pr = TesterStatistics(STAT_PROFIT), dd = TesterStatistics(STAT_EQUITY_DD), tr = TesterStatistics(STAT_TRADES);
+   double rf = pr / MathMax(dd, 1.0);
+   if(tr < 30) rf = MathMin(rf, 0) - 1;
+   return rf;
 }
 
 void OnTick()  { Process(); }
