@@ -11,6 +11,7 @@ const kLog = id => 'pt.exness.ea.log.' + id;
 
 const BUILTIN = [
   { id: 'litus', name: 'LITUS', file: 'ea/LITUS.mq5', sym: 'BTCUSD', tf: 300, desc: 'v1.04: stop order searah tren EMA200 H1, satu arah (sisi lawan dihapus begitu terisi), SL server 2 step yang ikut naik ke kunci Break-Even/Trailing, Risk Guard. Preset AUTO BTC: 1 level $50, SL $100 (backtest tick nyata 15 Agu–21 Nov: +6,9%, PF 1,17). XAU belum disarankan (Nov −92%).' },
+  { id: 'litus-layering', name: 'LITUS LAYERING', file: 'ea/LITUS_LAYERING.mq5', sym: 'XAUUSD', tf: 300, desc: 'LITUS lama (v1.03) dipulihkan: tangga 20 level BUY STOP + SELL STOP dua sisi, lot berlipat berpasangan (0.01 0.01 0.02 0.02 …), keluar basket Break-Even + Trailing, Risk Guard, filter jam/spread/ATR/berita. Magic 20261140 (terpisah dari LITUS). Risiko tinggi: dua sisi bisa terisi dan terkunci rugi.' },
   { id: 'macross', name: 'MA Cross', file: 'ea/MACross.mq5', tf: 900, desc: 'Contoh EA sederhana: EMA cepat memotong EMA lambat → buka posisi dengan SL/TP tetap.' }
 ];
 EA.BUILTIN = BUILTIN;
